@@ -336,7 +336,7 @@ async function hook(flags) {
     context = helloText(hello)
     board.state.warned = JSON.stringify(hello.overlap)
     board.save()
-    extra = { handle: hello.agent.handle, online: hello.peers.filter(p => p.online).length, unread: hello.unread }
+    extra = { handle: hello.agent.handle, repo: hello.agent.repo, online: hello.peers.filter(p => p.online).length, unread: hello.unread }
   } else if (event === 'SessionEnd') {
     if (board.state.token) await board.call('POST', '/api/bye', {})
   } else if (event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'Poll') {

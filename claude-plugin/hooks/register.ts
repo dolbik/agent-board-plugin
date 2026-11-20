@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 type Out = {
   hookSpecificOutput?: { additionalContext?: string }
-  agentBoard?: { handle?: string; online?: number; unread?: number; new?: number }
+  agentBoard?: { handle?: string; repo?: string | null; online?: number; unread?: number; new?: number }
 }
 
 const RETRY_MS = 30_000
@@ -64,6 +64,10 @@ export const register: Register = (on, options) => {
     show($, out)
     const text = out.hookSpecificOutput?.additionalContext
     if (text) await deliver($, text, false)
+    // A note alone waits for the next prompt; the board needs the repo now, and only once per folder.
+    if (out.agentBoard?.handle && !out.agentBoard.repo) {
+      await deliver($, 'agent-board: this folder is not a git checkout. Name the repo you work on here with `agb repo <owner/name>` now; if you cannot tell which repo it is, ask me.', true)
+    }
     void listen($).catch(() => {})
     return result
   })
