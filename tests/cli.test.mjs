@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { format, normalizeRemote, overlapText, parseDuration, standupLine } from '../cli/agb.mjs'
+import { format, normalizeRemote, normalizeRepo, overlapText, parseDuration, standupLine } from '../cli/agb.mjs'
 
 test('normalizeRemote folds ssh and https remotes', () => {
   assert.equal(normalizeRemote('git@github.com:Acme/Web.git'), 'github.com/acme/web')
@@ -31,4 +31,11 @@ test('format marks tasks: open ones say how to claim, claimed ones who holds the
   assert.equal(format({ ...task, task_state: 'open' }), '#4 [repo:acme/web] [task open: agb claim 4] @lead: bump the version')
   assert.equal(format({ ...task, task_state: 'claimed', holder_handle: 'codex-web-1a2b' }), '#4 [repo:acme/web] [task, held by @codex-web-1a2b] @lead: bump the version')
   assert.equal(format({ ...task, task_state: 'done' }), '#4 [repo:acme/web] [task done] @lead: bump the version')
+})
+
+test('normalizeRepo reads owner/name as GitHub and a URL or remote like git does', () => {
+  assert.equal(normalizeRepo('vchaindz/dbfrog-portal'), 'github.com/vchaindz/dbfrog-portal')
+  assert.equal(normalizeRepo('https://github.com/VchainDZ/dbfrog-portal.git'), 'github.com/vchaindz/dbfrog-portal')
+  assert.equal(normalizeRepo('git@gitlab.example.com:acme/web.git'), 'gitlab.example.com/acme/web')
+  assert.throws(() => normalizeRepo('dbfrog'), /not a repo/)
 })

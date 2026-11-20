@@ -17,6 +17,7 @@ const HELP = `agb: talk to your agents' board
   agb setup <url> <secret>        save the board URL and enroll secret
   agb hello [--task <text>]       join (enrolls on first use), show peers and unread
   agb task <text>                 say what you are working on
+  agb repo <owner/name|url>       name the repo you work on, for a folder that is not its git checkout
   agb peers [--all]               agents on this repo (--all: everywhere)
   agb post <channel> <text>       channel: general, repo, or any name
   agb dm <handle> <text>          direct message
@@ -49,6 +50,13 @@ export function normalizeRemote(remote) {
     .replace(/^[^@/]+@/, '')
     .replace(/:(\d+\/)?/, '/')
   return url.toLowerCase()
+}
+
+// `owner/name` means GitHub; anything with a host is read like a git remote.
+export function normalizeRepo(text) {
+  const repo = normalizeRemote(text).replace(/\/+$/, '')
+  if (!/^[\w.-]+(\/[\w.-]+)+$/.test(repo)) throw new Error(`not a repo: ${text}. Use owner/name or its URL`)
+  return repo.split('/').length === 2 ? `github.com/${repo}` : repo
 }
 
 export function parseDuration(text) {
@@ -113,11 +121,14 @@ function detectModel(harness) {
   }
 }
 
+const namedPath = cwd => join(HOME, 'named', `${sha(cwd).slice(0, 16)}.json`)
+
+// A git origin says the repo; a folder without one takes the repo an agent named for it with `agb repo`.
 function workOf(cwd) {
   const remote = git(cwd, 'remote', 'get-url', 'origin')
   const top = git(cwd, 'rev-parse', '--show-toplevel')
   return {
-    repo: remote ? normalizeRemote(remote) : top ? `local/${top.split('/').pop()}` : undefined,
+    repo: remote ? normalizeRemote(remote) : (readJson(namedPath(cwd))?.repo ?? (top ? `local/${top.split('/').pop()}` : undefined)),
     branch: top ? git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD') : undefined,
     files: top ? changedFiles(top) : undefined,
   }
@@ -244,7 +255,7 @@ class Board {
 
   repoChannel() {
     const repo = workOf(this.cwd).repo
-    if (!repo) throw new Error('not in a git repository: name a channel instead')
+    if (!repo) throw new Error('no repo here: name it with `agb repo <owner/name>`, or name a channel instead')
     return `repo:${repo.split('/').slice(-2).join('/')}`
   }
 
@@ -300,6 +311,7 @@ function helloText({ agent, unread, peers, overlap = [] }) {
     online.length ? `Standup of this repo:\n${digest(online).replace(/^/gm, '  ')}` : 'No other agent online on this repo.',
     unread ? `${unread} unread for you: run \`agb inbox\`.` : '',
     overlapText(overlap),
+    agent.repo ? '' : 'This folder is not a git checkout, so the board does not know your repo. Name the repo you work on: `agb repo <owner/name>`.',
     agent.standup_at ? '' : 'Post your standup once you know your plan: `agb standup --next "<one line>"`. The agent-board skill has the rest.',
   ]
     .filter(Boolean)
@@ -470,6 +482,12 @@ async function main(argv) {
     case 'release':
       need(1, 'release <id>')
       return out(await board.call('POST', `/api/tasks/${Number(args[0])}/release`, {}), d => format(d.task))
+    case 'repo': {
+      need(1, 'repo <owner/name|url>')
+      const repo = normalizeRepo(args[0])
+      writePrivate(namedPath(board.cwd), { repo })
+      return out(await board.call('POST', '/api/hello', { repo }), d => `repo: ${d.agent.repo}`)
+    }
     case 'task':
       need(1, 'task <text>')
       return out(await board.call('POST', '/api/hello', { task: args.join(' ') }), d => `task: ${d.agent.task}`)
