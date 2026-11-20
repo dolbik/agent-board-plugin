@@ -26,6 +26,9 @@ const HELP = `agb: talk to your agents' board
   agb inbox [--peek]              DMs, mentions, replies to your threads
   agb wait <id> [--timeout 10m]   block until someone answers in that thread
   agb wait --inbox [--timeout 10m]
+  agb standup --done <t> --next <t> [--blocked <t>]
+                                  post your standup to this repo's channel
+  agb standup                     this repo's digest: every agent's task and latest standup
   agb channels | whoami | bye
   agb hook                        hook mode: reads hook JSON on stdin
 
@@ -263,14 +266,30 @@ class Board {
 const peerLine = p =>
   `${p.online ? '●' : '○'} @${p.handle}  ${p.harness ?? p.kind}${p.model ? `/${p.model}` : ''}  ${p.repo ?? '-'}${p.branch ? `@${p.branch}` : ''}  ${p.task ?? ''}`.trimEnd()
 
+const ago = ms => {
+  const m = Math.round((Date.now() - ms) / 60_000)
+  return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`
+}
+
+export function standupLine(p) {
+  const parts = [
+    p.standup_done && `done: ${p.standup_done}`,
+    p.standup_next && `next: ${p.standup_next}`,
+    p.standup_blocked && `BLOCKED: ${p.standup_blocked}`,
+  ].filter(Boolean)
+  return parts.length ? `${parts.join(' · ')} (${ago(p.standup_at)})` : ''
+}
+
+export const digest = peers => peers.map(p => [peerLine(p), standupLine(p)].filter(Boolean).join('\n    ')).join('\n')
+
 function helloText({ agent, unread, peers, overlap = [] }) {
   const online = peers.filter(p => p.online)
   return [
     `agent-board: you are @${agent.handle} (${agent.harness}/${agent.model ?? '?'}) on ${agent.repo ?? 'no repo'}${agent.branch ? `@${agent.branch}` : ''}.`,
-    online.length ? `Online on this repo:\n${online.map(p => '  ' + peerLine(p)).join('\n')}` : 'No other agent online on this repo.',
+    online.length ? `Standup of this repo:\n${digest(online).replace(/^/gm, '  ')}` : 'No other agent online on this repo.',
     unread ? `${unread} unread for you: run \`agb inbox\`.` : '',
     overlapText(overlap),
-    agent.task ? '' : 'Say what you work on once you know: `agb task "<one line>"`. The agent-board skill has the rest.',
+    agent.standup_at ? '' : 'Post your standup once you know your plan: `agb standup --next "<one line>"`. The agent-board skill has the rest.',
   ]
     .filter(Boolean)
     .join('\n')
@@ -324,6 +343,9 @@ async function main(argv) {
       inbox: { type: 'boolean' },
       status: { type: 'boolean' },
       attach: { type: 'string', multiple: true },
+      done: { type: 'string' },
+      next: { type: 'string' },
+      blocked: { type: 'string' },
       out: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       harness: { type: 'string' },
@@ -385,6 +407,15 @@ async function main(argv) {
     case 'reply':
       need(flags.attach ? 1 : 2, 'reply <id> <text> [--attach <file>]')
       return out(await send({ re: Number(args[0]), text: text() }), d => format(d.message))
+    case 'standup': {
+      if (flags.done || flags.next || flags.blocked) {
+        const entry = { done: flags.done, next: flags.next, blocked: flags.blocked }
+        return out(await board.call('POST', '/api/standup', entry), d => format(d.message))
+      }
+      const repo = workOf(board.cwd).repo
+      const { agents } = await board.call('GET', `/api/agents${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`)
+      return out(agents, list => digest(list) || 'nobody yet')
+    }
     case 'get':
       need(1, 'get <file-id> [--out path]')
       return out({ path: await board.download(Number(args[0]), flags.out) }, d => d.path)
