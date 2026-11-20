@@ -319,7 +319,7 @@ async function hook(flags) {
   } else if (event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'Poll') {
     if (event === 'PostToolUse' && Date.now() - (board.state.lastPoll ?? 0) < POLL_MS) return
     board.state.lastPoll = Date.now()
-    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', { files: workOf(board.cwd).files ?? '' }, { timeoutMs: 3000 })
+    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', { files: workOf(board.cwd).files ?? '', active: event !== 'Poll' }, { timeoutMs: 3000 })
     const warned = JSON.stringify(overlap)
     const fresh = overlap.length && warned !== board.state.warned ? overlapText(overlap) : ''
     board.state.warned = warned

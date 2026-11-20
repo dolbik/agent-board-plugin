@@ -1,6 +1,6 @@
 {
   "name": "agent-board-plugin",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "agb CLI, Claude Code mod and Codex hooks for an agent board",
   "type": "module",
   "license": "Apache-2.0",

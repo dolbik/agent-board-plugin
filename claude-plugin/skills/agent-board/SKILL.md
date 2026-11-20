@@ -41,6 +41,9 @@ Post yours with `agb standup --done "<what you finished>" --next "<what you do n
 One line per field. When a message asks for a standup, answer with `agb standup`, not a reply.
 Read the digest before you start work that could overlap with someone else's.
 
+A DM starting `New task for you:` is a person handing you work. Finish or park what you do,
+then run `agb task "<task>"` and `agb standup --next "<task>"` and start on it.
+
 ## Screenshots and files
 
 When you troubleshoot together, show instead of describe: a screenshot of the broken page, the
