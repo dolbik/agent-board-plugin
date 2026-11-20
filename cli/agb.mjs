@@ -3,12 +3,14 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 const HOME = process.env.AGB_HOME ?? join(homedir(), '.config', 'agent-board')
 const POLL_MS = 30_000
+const FILES_MAX = 50
+const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain', '.log': 'text/plain', '.json': 'application/json', '.pdf': 'application/pdf' }
 const HELP = `agb: talk to your agents' board
 
   agb setup <url> <secret>        save the board URL and enroll secret
@@ -18,6 +20,8 @@ const HELP = `agb: talk to your agents' board
   agb post <channel> <text>       channel: general, repo, or any name
   agb dm <handle> <text>          direct message
   agb reply <id> <text>           reply in the thread of message <id>
+      --attach <file>             add a screenshot, log or other file (repeat for more, 10 MB each)
+  agb get <file-id> [--out path]  download an attachment, print where it went
   agb read [repo|<channel>|<id>]  recent messages; <id> reads a thread
   agb inbox [--peek]              DMs, mentions, replies to your threads
   agb wait <id> [--timeout 10m]   block until someone answers in that thread
@@ -43,9 +47,18 @@ export function parseDuration(text) {
   return Number(match[1]) * { ms: 1, s: 1000, m: 60_000, h: 3_600_000 }[match[2] ?? 's']
 }
 
+const size = bytes => (bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`)
+
 export function format(m) {
   const who = m.model ? `@${m.handle} (${m.harness ?? m.kind}/${m.model})` : `@${m.handle}`
-  return `#${m.id}${m.re ? ` ↳${m.re}` : ''} [${m.channel}] ${who}: ${m.text}`
+  const files = (m.attachments ?? []).map(f => `\n  [file ${f.id}: ${f.name}, ${f.type}, ${size(f.size)}; agb get ${f.id}]`).join('')
+  return `#${m.id}${m.re ? ` ↳${m.re}` : ''} [${m.channel}] ${who}: ${m.text}${files}`
+}
+
+export function overlapText(overlap) {
+  return overlap
+    .map(p => `agent-board: @${p.handle} is also changing ${p.files.join(', ')}. Coordinate before you edit: agb dm ${p.handle} "<text>"`)
+    .join('\n')
 }
 
 const sha = text => createHash('sha256').update(text).digest('hex')
@@ -95,7 +108,15 @@ function workOf(cwd) {
   return {
     repo: remote ? normalizeRemote(remote) : top ? `local/${top.split('/').pop()}` : undefined,
     branch: top ? git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD') : undefined,
+    files: top ? changedFiles(top) : undefined,
   }
+}
+
+// Paths relative to the repo root, so two clones of one repo compare equal.
+function changedFiles(top) {
+  const lists = [git(top, 'diff', '--name-only', 'HEAD'), git(top, 'ls-files', '--others', '--exclude-standard')]
+  const files = [...new Set(lists.flatMap(list => (list ? list.split('\n') : [])).filter(Boolean))]
+  return files.slice(0, FILES_MAX).join(',')
 }
 
 class Board {
@@ -137,21 +158,54 @@ class Board {
     writePrivate(this.statePath, this.state)
   }
 
-  async call(method, path, body, { auth = true, timeoutMs = 15_000 } = {}) {
+  async fetch(method, path, { body, headers = {}, auth = true, timeoutMs = 15_000 } = {}) {
     if (!this.url) throw new Error('no board URL: run `agb setup <url> <secret>` or set AGB_URL')
     if (auth && !this.state.token) await this.enroll()
     const response = await fetch(this.url + path, {
       method,
-      headers: {
-        ...(body ? { 'content-type': 'application/json' } : {}),
-        ...(auth ? { authorization: `Bearer ${this.state.token}` } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
+      headers: { ...headers, ...(auth ? { authorization: `Bearer ${this.state.token}` } : {}) },
+      body,
       signal: AbortSignal.timeout(timeoutMs),
     })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(`${response.status} ${data.error ?? response.statusText}`)
-    return data
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(`${response.status} ${data.error ?? response.statusText}`)
+    }
+    return response
+  }
+
+  async call(method, path, body, { auth = true, timeoutMs = 15_000 } = {}) {
+    const response = await this.fetch(method, path, {
+      body: body ? JSON.stringify(body) : undefined,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      auth,
+      timeoutMs,
+    })
+    return response.json().catch(() => ({}))
+  }
+
+  async upload(paths) {
+    const ids = []
+    for (const path of paths) {
+      const bytes = readFileSync(path)
+      const type = TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
+      const response = await this.fetch('POST', '/api/attachments', {
+        body: bytes,
+        headers: { 'content-type': type, 'x-filename': encodeURIComponent(basename(path)) },
+        timeoutMs: 60_000,
+      })
+      ids.push((await response.json()).attachment.id)
+    }
+    return ids
+  }
+
+  async download(id, out) {
+    const response = await this.fetch('GET', `/api/attachments/${id}`, { timeoutMs: 60_000 })
+    const name = /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? 'file'
+    const path = resolve(out ?? join(homedir(), '.cache', 'agent-board', `${id}-${name}`))
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, Buffer.from(await response.arrayBuffer()))
+    return path
   }
 
   async enroll() {
@@ -169,9 +223,9 @@ class Board {
   async hello() {
     const fresh = !this.state.token
     if (fresh) await this.enroll()
-    const { agent, unread } = await this.call('POST', '/api/hello', this.identity())
+    const { agent, unread, overlap } = await this.call('POST', '/api/hello', this.identity())
     const peers = agent.repo ? (await this.call('GET', `/api/agents?repo=${encodeURIComponent(agent.repo)}`)).agents : []
-    return { agent, unread, peers: peers.filter(p => p.id !== agent.id) }
+    return { agent, unread, overlap: overlap ?? [], peers: peers.filter(p => p.id !== agent.id) }
   }
 
   repoChannel() {
@@ -209,12 +263,13 @@ class Board {
 const peerLine = p =>
   `${p.online ? '●' : '○'} @${p.handle}  ${p.harness ?? p.kind}${p.model ? `/${p.model}` : ''}  ${p.repo ?? '-'}${p.branch ? `@${p.branch}` : ''}  ${p.task ?? ''}`.trimEnd()
 
-function helloText({ agent, unread, peers }) {
+function helloText({ agent, unread, peers, overlap = [] }) {
   const online = peers.filter(p => p.online)
   return [
     `agent-board: you are @${agent.handle} (${agent.harness}/${agent.model ?? '?'}) on ${agent.repo ?? 'no repo'}${agent.branch ? `@${agent.branch}` : ''}.`,
     online.length ? `Online on this repo:\n${online.map(p => '  ' + peerLine(p)).join('\n')}` : 'No other agent online on this repo.',
     unread ? `${unread} unread for you: run \`agb inbox\`.` : '',
+    overlapText(overlap),
     agent.task ? '' : 'Say what you work on once you know: `agb task "<one line>"`. The agent-board skill has the rest.',
   ]
     .filter(Boolean)
@@ -237,15 +292,20 @@ async function hook(flags) {
   if (event === 'SessionStart') {
     const hello = await board.hello()
     context = helloText(hello)
+    board.state.warned = JSON.stringify(hello.overlap)
+    board.save()
     extra = { handle: hello.agent.handle, online: hello.peers.filter(p => p.online).length, unread: hello.unread }
   } else if (event === 'SessionEnd') {
     if (board.state.token) await board.call('POST', '/api/bye', {})
   } else if (event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'Poll') {
     if (event === 'PostToolUse' && Date.now() - (board.state.lastPoll ?? 0) < POLL_MS) return
     board.state.lastPoll = Date.now()
+    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', { files: workOf(board.cwd).files ?? '' }, { timeoutMs: 3000 })
+    const warned = JSON.stringify(overlap)
+    const fresh = overlap.length && warned !== board.state.warned ? overlapText(overlap) : ''
+    board.state.warned = warned
     board.save()
-    const { messages, online } = await board.call('POST', '/api/inbox', {}, { timeoutMs: 3000 })
-    if (messages.length) context = inboxText(messages)
+    context = [messages.length ? inboxText(messages) : '', fresh].filter(Boolean).join('\n') || undefined
     extra = { handle: board.state.handle, online, unread: 0, new: messages.length }
   }
   const out = context ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : {}
@@ -263,6 +323,8 @@ async function main(argv) {
       peek: { type: 'boolean' },
       inbox: { type: 'boolean' },
       status: { type: 'boolean' },
+      attach: { type: 'string', multiple: true },
+      out: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       harness: { type: 'string' },
       model: { type: 'string' },
@@ -293,6 +355,10 @@ async function main(argv) {
 
   const board = new Board(flags)
   const text = () => args.slice(1).join(' ')
+  const send = async body => {
+    const attachments = flags.attach?.length ? await board.upload(flags.attach) : undefined
+    return board.call('POST', '/api/messages', { ...body, attachments })
+  }
   switch (command) {
     case 'hello':
       return out(await board.hello(), helloText)
@@ -311,14 +377,17 @@ async function main(argv) {
     case 'channels':
       return out(await board.call('GET', '/api/channels'), d => d.channels.map(c => `${c.channel}  ${c.count} msgs`).join('\n'))
     case 'post':
-      need(2, 'post <channel> <text>')
-      return out(await board.call('POST', '/api/messages', { channel: board.channelOf(args[0]), text: text() }), d => format(d.message))
+      need(flags.attach ? 1 : 2, 'post <channel> <text> [--attach <file>]')
+      return out(await send({ channel: board.channelOf(args[0]), text: text() }), d => format(d.message))
     case 'dm':
-      need(2, 'dm <handle> <text>')
-      return out(await board.call('POST', '/api/messages', { to: args[0], text: text() }), d => format(d.message))
+      need(flags.attach ? 1 : 2, 'dm <handle> <text> [--attach <file>]')
+      return out(await send({ to: args[0], text: text() }), d => format(d.message))
     case 'reply':
-      need(2, 'reply <id> <text>')
-      return out(await board.call('POST', '/api/messages', { re: Number(args[0]), text: text() }), d => format(d.message))
+      need(flags.attach ? 1 : 2, 'reply <id> <text> [--attach <file>]')
+      return out(await send({ re: Number(args[0]), text: text() }), d => format(d.message))
+    case 'get':
+      need(1, 'get <file-id> [--out path]')
+      return out({ path: await board.download(Number(args[0]), flags.out) }, d => d.path)
     case 'read': {
       const target = args[0] ?? 'repo'
       const query = new URLSearchParams({ limit: flags.limit ?? '30', after: flags.after ?? '0' })
@@ -327,7 +396,9 @@ async function main(argv) {
       return out(await board.call('GET', `/api/messages?${query}`), d => d.messages.map(format).join('\n') || 'no messages')
     }
     case 'inbox':
-      return out(await board.call('POST', '/api/inbox', { mark: !flags.peek }), d => d.messages.map(format).join('\n') || 'inbox empty')
+      return out(await board.call('POST', '/api/inbox', { mark: !flags.peek, files: workOf(board.cwd).files ?? '' }), d =>
+        [d.messages.map(format).join('\n') || 'inbox empty', overlapText(d.overlap ?? [])].filter(Boolean).join('\n'),
+      )
     case 'wait': {
       const timeoutMs = parseDuration(flags.timeout ?? '10m')
       if (!board.state.token) await board.enroll()
