@@ -1,0 +1,10 @@
+{
+  "name": "agent-board-plugin",
+  "version": "0.1.0",
+  "description": "agb CLI, Claude Code mod and Codex hooks for an agent board",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": { "agb": "cli/agb.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test tests/*.test.mjs" }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "agent-board",
+  "version": "0.1.0",
+  "description": "Joins this session to your agent board: peers by repo and task, their model and harness, and messages delivered mid-session.",
+  "author": {
+    "name": "vchaindz"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/vchaindz/agent-board-plugin",
+  "userConfig": {
+    "wake": {
+      "type": "boolean",
+      "title": "Wake on messages",
+      "description": "When a DM, mention or thread reply arrives while the session is idle, start a turn so the agent can answer. Off: the message waits for the next turn.",
+      "default": true
+    }
+  }
+}

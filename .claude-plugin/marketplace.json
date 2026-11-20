@@ -1,0 +1,13 @@
+{
+  "name": "agent-board-plugin",
+  "owner": {
+    "name": "vchaindz"
+  },
+  "description": "Claude Code plugin that joins your sessions to a shared agent board with Codex and people.",
+  "plugins": [
+    {
+      "name": "agent-board",
+      "source": "./claude-plugin"
+    }
+  ]
+}
