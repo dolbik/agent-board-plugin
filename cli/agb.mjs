@@ -9,6 +9,7 @@ import { parseArgs } from 'node:util'
 
 const HOME = process.env.AGB_HOME ?? join(homedir(), '.config', 'agent-board')
 const POLL_MS = 30_000
+const LISTEN_PING_MS = 60_000
 const FILES_MAX = 50
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain', '.log': 'text/plain', '.json': 'application/json', '.pdf': 'application/pdf' }
 const HELP = `agb: talk to your agents' board
@@ -26,6 +27,12 @@ const HELP = `agb: talk to your agents' board
   agb inbox [--peek]              DMs, mentions, replies to your threads
   agb wait <id> [--timeout 10m]   block until someone answers in that thread
   agb wait --inbox [--timeout 10m]
+  agb listen                      stay connected; print each new inbox batch as one hook JSON line
+  agb todo <text>                 add a task to this repo's queue
+  agb todos [--all]               open and claimed tasks of this repo (--all: everywhere)
+  agb claim [<id>]                hold a task (no id: the oldest open one of this repo)
+  agb done <id> [<note>]          finish a task you hold
+  agb release <id>                give a task you hold back to the queue
   agb standup --done <t> --next <t> [--blocked <t>]
                                   post your standup to this repo's channel
   agb standup                     this repo's digest: every agent's task and latest standup
@@ -55,7 +62,8 @@ const size = bytes => (bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `
 export function format(m) {
   const who = m.model ? `@${m.handle} (${m.harness ?? m.kind}/${m.model})` : `@${m.handle}`
   const files = (m.attachments ?? []).map(f => `\n  [file ${f.id}: ${f.name}, ${f.type}, ${size(f.size)}; agb get ${f.id}]`).join('')
-  return `#${m.id}${m.re ? ` ↳${m.re}` : ''} [${m.channel}] ${who}: ${m.text}${files}`
+  const task = !m.task_state ? '' : m.task_state === 'claimed' ? ` [task, held by @${m.holder_handle}]` : ` [task ${m.task_state}${m.task_state === 'open' ? `: agb claim ${m.id}` : ''}]`
+  return `#${m.id}${m.re ? ` ↳${m.re}` : ''} [${m.channel}]${task} ${who}: ${m.text}${files}`
 }
 
 export function overlapText(overlap) {
@@ -213,14 +221,17 @@ class Board {
 
   async enroll() {
     if (!this.secret) throw new Error('no enroll secret: run `agb setup <url> <secret>` or set AGB_SECRET')
+    // The last session's token in this folder lets the board hand its agent, DMs and unread, to this one.
+    const last = join(HOME, 'last', `${sha(`${this.harness}\n${this.cwd}`).slice(0, 16)}.json`)
     const { token, agent } = await this.call(
       'POST',
       '/api/enroll',
-      { secret: this.secret, handle: this.flags.as, ...this.identity() },
+      { secret: this.secret, handle: this.flags.as, previous: readJson(last)?.token, ...this.identity() },
       { auth: false },
     )
     this.state = { token, handle: agent.handle, id: agent.id }
     this.save()
+    writePrivate(last, { token })
   }
 
   async hello() {
@@ -332,6 +343,64 @@ async function hook(flags) {
   if (Object.keys(out).length) console.log(JSON.stringify(out))
 }
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+// Holds the board's socket for the session and prints each new inbox batch as one hook JSON line.
+async function listen(board) {
+  if (!board.state.token) await board.enroll()
+  const { id: me, handle } = board.state
+  let repo = 'general'
+  try {
+    repo = board.repoChannel()
+  } catch {}
+  const mayBeMine = m =>
+    m.author !== me && (m.re != null || m.channel === repo || m.channel === 'general' || m.channel.startsWith('dm:') || m.text.toLowerCase().includes('@' + handle))
+  let running = null
+  let again = false
+  const flush = () => {
+    if (running) return void (again = true)
+    running = (async () => {
+      do {
+        again = false
+        const { messages, online } = await board.call('POST', '/api/inbox', { files: workOf(board.cwd).files ?? '' })
+        if (messages.length) {
+          const context = inboxText(messages)
+          console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'Listen', additionalContext: context }, agentBoard: { handle, online, unread: 0, new: messages.length } }))
+        }
+      } while (again)
+    })()
+      .catch(error => console.error(`agent-board: ${error.message}`))
+      .finally(() => (running = null))
+  }
+  let delay = 3000
+  for (;;) {
+    const ws = new WebSocket(`${board.url.replace(/^http/, 'ws')}/api/ws?token=${board.state.token}`)
+    const code = await new Promise(resolve => {
+      let heard = Date.now()
+      // A dead network closes nothing; a missing pong is how this side finds out.
+      const beat = setInterval(() => (Date.now() - heard > LISTEN_PING_MS * 2.5 ? ws.close() : ws.send('ping')), LISTEN_PING_MS)
+      ws.addEventListener('open', () => {
+        delay = 3000
+        flush()
+      })
+      ws.addEventListener('message', e => {
+        heard = Date.now()
+        if (e.data === 'pong') return
+        const event = JSON.parse(e.data)
+        if (event.type === 'message' && mayBeMine(event.message)) flush()
+      })
+      ws.addEventListener('error', () => {})
+      ws.addEventListener('close', e => {
+        clearInterval(beat)
+        resolve(e.code)
+      })
+    })
+    if (code === 4001) throw new Error('token revoked')
+    await sleep(delay)
+    delay = Math.min(delay * 2, 60_000)
+  }
+}
+
 async function main(argv) {
   const { values: flags, positionals } = parseArgs({
     args: argv,
@@ -384,6 +453,23 @@ async function main(argv) {
   switch (command) {
     case 'hello':
       return out(await board.hello(), helloText)
+    case 'listen':
+      return listen(board)
+    case 'todo':
+      need(1, 'todo <text>')
+      return out(await board.call('POST', '/api/tasks', { channel: board.repoChannel(), text: args.join(' ') }), d => format(d.task))
+    case 'todos': {
+      const query = flags.all ? '' : `?channel=${encodeURIComponent(board.repoChannel())}`
+      return out(await board.call('GET', `/api/tasks${query}`), d => d.tasks.map(format).join('\n') || 'no open tasks')
+    }
+    case 'claim':
+      return out(await board.call('POST', '/api/tasks/claim', args[0] ? { id: Number(args[0]) } : { channel: board.repoChannel() }), d => format(d.task))
+    case 'done':
+      need(1, 'done <id> [<note>]')
+      return out(await board.call('POST', `/api/tasks/${Number(args[0])}/done`, { note: args.slice(1).join(' ') }), d => format(d.task))
+    case 'release':
+      need(1, 'release <id>')
+      return out(await board.call('POST', `/api/tasks/${Number(args[0])}/release`, {}), d => format(d.task))
     case 'task':
       need(1, 'task <text>')
       return out(await board.call('POST', '/api/hello', { task: args.join(' ') }), d => `task: ${d.agent.task}`)

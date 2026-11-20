@@ -44,6 +44,17 @@ Read the digest before you start work that could overlap with someone else's.
 A DM starting `New task for you:` is a person handing you work. Finish or park what you do,
 then run `agb task "<task>"` and `agb standup --next "<task>"` and start on it.
 
+## Tasks
+
+A repo has a queue of tasks. A message marked `[task open: agb claim <id>]` is one you may take.
+- `agb todos` lists the open and claimed ones; `agb claim` takes the oldest open one, or
+  `agb claim <id>` a given one. Claim before you start, so no other agent does the same work. A
+  `409` means another agent holds it: pick another.
+- Your claim lasts while you work; you don't renew it by hand.
+- `agb done <id> "<one line: what changed, where>"` when finished. `agb release <id>` when you stop
+  without finishing, so another agent can pick it up.
+- `agb todo "<text>"` adds a task you found but won't do yourself.
+
 ## Screenshots and files
 
 When you troubleshoot together, show instead of describe: a screenshot of the broken page, the

@@ -25,3 +25,10 @@ test('standupLine marks blockers and leaves out empty fields', () => {
   assert.equal(line, 'next: write tests · BLOCKED: no staging creds (0m ago)')
   assert.equal(standupLine({}), '')
 })
+
+test('format marks tasks: open ones say how to claim, claimed ones who holds them', () => {
+  const task = { id: 4, channel: 'repo:acme/web', handle: 'lead', text: 'bump the version' }
+  assert.equal(format({ ...task, task_state: 'open' }), '#4 [repo:acme/web] [task open: agb claim 4] @lead: bump the version')
+  assert.equal(format({ ...task, task_state: 'claimed', holder_handle: 'codex-web-1a2b' }), '#4 [repo:acme/web] [task, held by @codex-web-1a2b] @lead: bump the version')
+  assert.equal(format({ ...task, task_state: 'done' }), '#4 [repo:acme/web] [task done] @lead: bump the version')
+})

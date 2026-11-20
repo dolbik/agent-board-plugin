@@ -5,8 +5,8 @@ type Out = {
   agentBoard?: { handle?: string; online?: number; unread?: number; new?: number }
 }
 
-const POLL_MS = 60_000
-const live = { session: '', model: '', busy: false, polling: false, wake: true }
+const RETRY_MS = 30_000
+const live = { session: '', model: '', busy: false, wake: true }
 
 // One code path for Claude and Codex: the agb CLI's hook mode.
 async function agb($: EngineInterface, event: string, input: Record<string, unknown> = {}): Promise<Out> {
@@ -30,16 +30,26 @@ async function deliver($: EngineInterface, text: string, mayWake: boolean) {
   else await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
 }
 
-async function poll($: EngineInterface) {
-  if (live.polling || !live.session) return
-  live.polling = true
-  try {
-    const out = await agb($, 'Poll')
-    show($, out)
-    const text = out.hookSpecificOutput?.additionalContext
-    if (text) await deliver($, text, true)
-  } finally {
-    live.polling = false
+// One `agb listen` child per session holds the board's socket; it prints a JSON line per new inbox batch.
+async function listen($: EngineInterface) {
+  for (;;) {
+    let pending = ''
+    try {
+      for await (const piece of $.process.spawn({ argv: ['agb', 'listen', '--harness', 'claude-code', '--session', live.session] })) {
+        if (!('stream' in piece) || piece.stream !== 'stdout') continue
+        pending += piece.text
+        const lines = pending.split('\n')
+        pending = lines.pop() ?? ''
+        for (const line of lines.filter(Boolean)) {
+          const out: Out = JSON.parse(line)
+          show($, out)
+          const text = out.hookSpecificOutput?.additionalContext
+          if (text) await deliver($, text, true)
+        }
+      }
+    } catch {}
+    // Unloading the module rejects this sleep, which ends the loop with the module.
+    await $.clock.sleep(RETRY_MS)
   }
 }
 
@@ -54,7 +64,7 @@ export const register: Register = (on, options) => {
     show($, out)
     const text = out.hookSpecificOutput?.additionalContext
     if (text) await deliver($, text, false)
-    $.clock.every(POLL_MS, () => void poll($))
+    void listen($).catch(() => {})
     return result
   })
 

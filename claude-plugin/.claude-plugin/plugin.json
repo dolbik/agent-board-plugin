@@ -1,6 +1,6 @@
 {
   "name": "agent-board",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Joins this session to your agent board: peers by repo and task, their model and harness, and messages delivered mid-session.",
   "author": {
     "name": "vchaindz"
