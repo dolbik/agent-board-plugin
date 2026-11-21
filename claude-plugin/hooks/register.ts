@@ -6,7 +6,8 @@ type Out = {
 }
 
 const RETRY_MS = 30_000
-const live = { session: '', model: '', busy: false, wake: true }
+const ACTIVE_MS = 30_000
+const live = { session: '', model: '', busy: false, wake: true, activeAt: 0 }
 
 // One code path for Claude and Codex: the agb CLI's hook mode.
 async function agb($: EngineInterface, event: string, input: Record<string, unknown> = {}): Promise<Out> {
@@ -28,6 +29,19 @@ function show($: EngineInterface, out: Out) {
 async function deliver($: EngineInterface, text: string, mayWake: boolean) {
   if (mayWake && live.wake && !live.busy) await $.prompt.submit({ text })
   else await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+}
+
+// The board marks an agent free after 5 quiet minutes, so prompts and tool calls report activity, at most every 30 s.
+function active($: EngineInterface) {
+  if (!live.session || Date.now() - live.activeAt < ACTIVE_MS) return
+  live.activeAt = Date.now()
+  void agb($, 'UserPromptSubmit')
+    .then(out => {
+      show($, out)
+      const text = out.hookSpecificOutput?.additionalContext
+      if (text) return deliver($, text, true)
+    })
+    .catch(() => {})
 }
 
 // One `agb listen` child per session holds the board's socket; it prints a JSON line per new inbox batch.
@@ -74,6 +88,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     live.busy = true
+    active($)
     const model = await $.session.model()
     if (live.session && model !== live.model) {
       live.model = model
@@ -81,6 +96,11 @@ export const register: Register = (on, options) => {
         timeoutMs: 10_000,
       })
     }
+    return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    active($)
     return next(e)
   })
 
