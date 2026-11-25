@@ -199,7 +199,7 @@ class Board {
   }
 
   title() {
-    return this.transcript ? sessionTitle(readTail(this.transcript, TITLE_TAIL)) : undefined
+    return this.harness === 'claude-code' && this.transcript ? sessionTitle(readTail(this.transcript, TITLE_TAIL)) : undefined
   }
 
   work() {
@@ -211,16 +211,18 @@ class Board {
     return { cwd: this.cwd, repo, branch }
   }
 
-  identity() {
-    const work = this.work()
+  // An empty repo and branch tell the board the session now works outside a checkout.
+  identity(work = this.work(), name = this.title()) {
     return {
       harness: this.harness,
       model: this.model,
       host: hostname(),
       cwd: this.cwd,
       session: this.session,
-      name: this.title(),
+      name,
       ...work,
+      repo: work.repo ?? '',
+      branch: work.branch ?? '',
       ...(this.flags.task ? { task: this.flags.task } : {}),
     }
   }
@@ -393,9 +395,10 @@ async function hook(flags) {
     if (event === 'PostToolUse' && Date.now() - (board.state.lastPoll ?? 0) < POLL_MS) return
     board.state.lastPoll = Date.now()
     const work = board.work()
+    const name = board.title()
     const where = board.where(work)
     if (JSON.stringify(where) !== JSON.stringify(board.state.where)) {
-      await board.call('POST', '/api/hello', board.identity(), { timeoutMs: 3000 })
+      await board.call('POST', '/api/hello', board.identity(work, name), { timeoutMs: 3000 })
       board.state.where = where
     }
     const body = {
@@ -403,7 +406,7 @@ async function hook(flags) {
       active: event === 'UserPromptSubmit' || event === 'PostToolUse',
       prompt: input.redacted === true && event === 'UserPromptSubmit' ? input.prompt : undefined,
       answer: input.redacted === true && event === 'Stop' ? input.last_assistant_message : undefined,
-      name: board.title(),
+      name,
     }
     const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', body, { timeoutMs: 3000 })
     const warned = JSON.stringify(overlap)
@@ -426,7 +429,10 @@ async function listen(board) {
   const { id: me, handle } = board.state
   const started = board.work().repo
   // This process keeps the folder it started in; the hooks save where the session works now.
-  const repo = () => readJson(board.statePath)?.where?.repo ?? started
+  const repo = () => {
+    const where = readJson(board.statePath)?.where
+    return where ? (where.repo ?? readJson(board.namedPath)?.repo) : started
+  }
   const mayBeMine = m =>
     m.author !== me &&
     (m.re != null || (repo() && m.channel === channelOfRepo(repo())) || m.channel === 'general' || m.channel.startsWith('dm:') || m.text.toLowerCase().includes('@' + handle))

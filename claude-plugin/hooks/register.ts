@@ -36,10 +36,15 @@ async function deliver($: EngineInterface, text: string, mayWake: boolean) {
 let reports: Promise<void> = Promise.resolve()
 
 // One report at a time, in the order things happened, so an answer never lands after the next turn's start.
-function report($: EngineInterface, event: string, said?: { key: string; text: string }) {
+function report($: EngineInterface, event: string, said?: { key: string; text: string; end?: boolean }) {
   reports = reports
     .then(async () => {
-      const input = said ? { [said.key]: await $.session.redact(said.text), redacted: true } : {}
+      let input = {}
+      if (said) {
+        // Mask the whole text before cutting it, so a credential split by the cut is still found.
+        const masked = await $.session.redact(said.text)
+        input = { [said.key]: said.end ? masked.slice(-TEXT_MAX) : masked.slice(0, TEXT_MAX), redacted: true }
+      }
       const out = await agb($, event, input)
       show($, out)
       const text = out.hookSpecificOutput?.additionalContext
@@ -98,7 +103,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', ($, e, next) => {
     if (live.session && TYPED.has(e.origin.kind) && !e.command && !e.isMeta && e.text.trim()) {
       live.activeAt = Date.now()
-      report($, 'UserPromptSubmit', { key: 'prompt', text: e.text.slice(0, TEXT_MAX) })
+      report($, 'UserPromptSubmit', { key: 'prompt', text: e.text })
     }
     return next(e)
   })
@@ -126,7 +131,7 @@ export const register: Register = (on, options) => {
     live.busy = false
     if (live.session && !e.agentId && e.reason === 'answer' && e.answer.trim()) {
       live.activeAt = 0
-      report($, 'Stop', { key: 'last_assistant_message', text: e.answer.slice(-TEXT_MAX) })
+      report($, 'Stop', { key: 'last_assistant_message', text: e.answer, end: true })
     }
     return next(e)
   })
