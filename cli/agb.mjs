@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,7 @@ const HOME = process.env.AGB_HOME ?? join(homedir(), '.config', 'agent-board')
 const POLL_MS = 30_000
 const LISTEN_PING_MS = 60_000
 const FILES_MAX = 50
+const TITLE_TAIL = 4 * 1024 * 1024
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.txt': 'text/plain', '.log': 'text/plain', '.json': 'application/json', '.pdf': 'application/pdf' }
 const HELP = `agb: talk to your agents' board
 
@@ -141,6 +142,37 @@ function changedFiles(top) {
   return files.slice(0, FILES_MAX).join(',')
 }
 
+// The session's name as Claude Code shows it: the title the user gave, else the one it generated.
+export function sessionTitle(journal) {
+  let given
+  let generated
+  for (const line of journal.split('\n')) {
+    if (!line.startsWith('{"type":"custom-title"') && !line.startsWith('{"type":"ai-title"')) continue
+    try {
+      const entry = JSON.parse(line)
+      given = entry.customTitle ?? given
+      generated = entry.aiTitle ?? generated
+    } catch {}
+  }
+  return given ?? generated
+}
+
+function readTail(path, bytes) {
+  try {
+    const fd = openSync(path, 'r')
+    try {
+      const size = fstatSync(fd).size
+      const buffer = Buffer.alloc(Math.min(size, bytes))
+      readSync(fd, buffer, 0, buffer.length, size - buffer.length)
+      return buffer.toString('utf8')
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return ''
+  }
+}
+
 class Board {
   constructor(flags, hookInput = {}) {
     this.flags = flags
@@ -163,6 +195,11 @@ class Board {
     // Its own file, as hooks running beside `agb repo` rewrite the session state whole.
     this.namedPath = join(HOME, 'repos', `${sha(key).slice(0, 16)}.json`)
     this.state = readJson(this.statePath) ?? {}
+    this.transcript = hookInput.transcript_path
+  }
+
+  title() {
+    return this.transcript ? sessionTitle(readTail(this.transcript, TITLE_TAIL)) : undefined
   }
 
   work() {
@@ -182,6 +219,7 @@ class Board {
       host: hostname(),
       cwd: this.cwd,
       session: this.session,
+      name: this.title(),
       ...work,
       ...(this.flags.task ? { task: this.flags.task } : {}),
     }
@@ -351,7 +389,7 @@ async function hook(flags) {
     extra = { handle: hello.agent.handle, repo: hello.agent.repo, online: hello.peers.filter(p => p.online).length, unread: hello.unread }
   } else if (event === 'SessionEnd') {
     if (board.state.token) await board.call('POST', '/api/bye', {})
-  } else if (event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'Poll') {
+  } else if (event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'Poll' || event === 'Stop') {
     if (event === 'PostToolUse' && Date.now() - (board.state.lastPoll ?? 0) < POLL_MS) return
     board.state.lastPoll = Date.now()
     const work = board.work()
@@ -360,7 +398,14 @@ async function hook(flags) {
       await board.call('POST', '/api/hello', board.identity(), { timeoutMs: 3000 })
       board.state.where = where
     }
-    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', { files: work.files ?? '', active: event !== 'Poll' }, { timeoutMs: 3000 })
+    const body = {
+      files: work.files ?? '',
+      active: event === 'UserPromptSubmit' || event === 'PostToolUse',
+      prompt: input.redacted === true && event === 'UserPromptSubmit' ? input.prompt : undefined,
+      answer: input.redacted === true && event === 'Stop' ? input.last_assistant_message : undefined,
+      name: board.title(),
+    }
+    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', body, { timeoutMs: 3000 })
     const warned = JSON.stringify(overlap)
     const fresh = overlap.length && warned !== board.state.warned ? overlapText(overlap) : ''
     board.state.warned = warned

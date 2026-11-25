@@ -7,12 +7,14 @@ type Out = {
 
 const RETRY_MS = 30_000
 const ACTIVE_MS = 30_000
-const live = { session: '', model: '', busy: false, wake: true, activeAt: 0 }
+const TEXT_MAX = 2_000
+const TYPED = new Set(['composer', 'bridge', 'sdk'])
+const live = { session: '', transcript: '', model: '', busy: false, wake: true, activeAt: 0 }
 
 // One code path for Claude and Codex: the agb CLI's hook mode, told the folder the session is in now.
 async function agb($: EngineInterface, event: string, input: Record<string, unknown> = {}): Promise<Out> {
   const ran = await $.process.run(['agb', 'hook', '--harness', 'claude-code', '--status'], {
-    stdin: JSON.stringify({ hook_event_name: event, session_id: live.session, cwd: await $.session.cwd(), ...input }),
+    stdin: JSON.stringify({ hook_event_name: event, session_id: live.session, cwd: await $.session.cwd(), transcript_path: live.transcript, ...input }),
     timeoutMs: 10_000,
   })
   if (ran.exitCode !== 0 || !ran.stdout.trim()) return {}
@@ -31,17 +33,26 @@ async function deliver($: EngineInterface, text: string, mayWake: boolean) {
   else await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
 }
 
+let reports: Promise<void> = Promise.resolve()
+
+// One report at a time, in the order things happened, so an answer never lands after the next turn's start.
+function report($: EngineInterface, event: string, said?: { key: string; text: string }) {
+  reports = reports
+    .then(async () => {
+      const input = said ? { [said.key]: await $.session.redact(said.text), redacted: true } : {}
+      const out = await agb($, event, input)
+      show($, out)
+      const text = out.hookSpecificOutput?.additionalContext
+      if (text) void deliver($, text, true).catch(() => {})
+    })
+    .catch(() => {})
+}
+
 // The board marks an agent free after 5 quiet minutes, so prompts and tool calls report activity, at most every 30 s.
 function active($: EngineInterface) {
   if (!live.session || Date.now() - live.activeAt < ACTIVE_MS) return
   live.activeAt = Date.now()
-  void agb($, 'UserPromptSubmit')
-    .then(out => {
-      show($, out)
-      const text = out.hookSpecificOutput?.additionalContext
-      if (text) return deliver($, text, true)
-    })
-    .catch(() => {})
+  report($, 'UserPromptSubmit')
 }
 
 // One `agb listen` child per session holds the board's socket; it prints a JSON line per new inbox batch.
@@ -73,6 +84,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     live.session = await $.session.id()
+    live.transcript = (await $.session.info()).transcriptPath
     live.model = await $.session.model()
     const out = await agb($, 'SessionStart', { model: live.model })
     show($, out)
@@ -80,6 +92,15 @@ export const register: Register = (on, options) => {
     if (text) await deliver($, text, false)
     void listen($).catch(() => {})
     return result
+  })
+
+  // What the person typed, not what the board or another session delivered.
+  on('prompt.submit', ($, e, next) => {
+    if (live.session && TYPED.has(e.origin.kind) && !e.command && !e.isMeta && e.text.trim()) {
+      live.activeAt = Date.now()
+      report($, 'UserPromptSubmit', { key: 'prompt', text: e.text.slice(0, TEXT_MAX) })
+    }
+    return next(e)
   })
 
   on('turn.start', async ($, e, next) => {
@@ -100,8 +121,13 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The board shows the answer's end and marks the agent as waiting when it asks; the next turn's report clears that.
   on('turn.complete', ($, e, next) => {
     live.busy = false
+    if (live.session && !e.agentId && e.reason === 'answer' && e.answer.trim()) {
+      live.activeAt = 0
+      report($, 'Stop', { key: 'last_assistant_message', text: e.answer.slice(-TEXT_MAX) })
+    }
     return next(e)
   })
 

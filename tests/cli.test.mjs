@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { format, normalizeRemote, normalizeRepo, overlapText, parseDuration, standupLine } from '../cli/agb.mjs'
+import { format, normalizeRemote, normalizeRepo, overlapText, parseDuration, sessionTitle, standupLine } from '../cli/agb.mjs'
 
 test('normalizeRemote folds ssh and https remotes', () => {
   assert.equal(normalizeRemote('git@github.com:Acme/Web.git'), 'github.com/acme/web')
@@ -31,6 +31,15 @@ test('format marks tasks: open ones say how to claim, claimed ones who holds the
   assert.equal(format({ ...task, task_state: 'open' }), '#4 [repo:acme/web] [task open: agb claim 4] @lead: bump the version')
   assert.equal(format({ ...task, task_state: 'claimed', holder_handle: 'codex-web-1a2b' }), '#4 [repo:acme/web] [task, held by @codex-web-1a2b] @lead: bump the version')
   assert.equal(format({ ...task, task_state: 'done' }), '#4 [repo:acme/web] [task done] @lead: bump the version')
+})
+
+test('sessionTitle takes the name the user gave the session, else the generated one', () => {
+  const generated = '{"type":"ai-title","aiTitle":"fix the login form","sessionId":"s"}'
+  const given = '{"type":"custom-title","customTitle":"Agent Board fixes","sessionId":"s"}'
+  const later = '{"type":"ai-title","aiTitle":"review the board","sessionId":"s"}'
+  assert.equal(sessionTitle(['tle":"cut off"}', generated, '{"type":"user","message":{}}'].join('\n')), 'fix the login form')
+  assert.equal(sessionTitle([generated, given, later].join('\n')), 'Agent Board fixes')
+  assert.equal(sessionTitle(''), undefined)
 })
 
 test('normalizeRepo reads owner/name as GitHub and a URL or remote like git does', () => {
