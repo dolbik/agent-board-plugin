@@ -1,4 +1,9 @@
 import { strict as assert } from 'node:assert'
+import { spawn } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { format, normalizeRemote, normalizeRepo, overlapText, parseDuration, sessionTitle, standupLine } from '../cli/agb.mjs'
 
@@ -40,6 +45,33 @@ test('sessionTitle takes the name the user gave the session, else the generated 
   assert.equal(sessionTitle(['tle":"cut off"}', generated, '{"type":"user","message":{}}'].join('\n')), 'fix the login form')
   assert.equal(sessionTitle([generated, given, later].join('\n')), 'Agent Board fixes')
   assert.equal(sessionTitle(''), undefined)
+})
+
+test('a hook still reports the prompt when telling the board about a new folder fails', async () => {
+  const inbox = []
+  const board = createServer((req, res) => {
+    let body = ''
+    req.on('data', chunk => (body += chunk))
+    req.on('end', () => {
+      if (req.url === '/api/enroll') return res.end(JSON.stringify({ token: 't', agent: { handle: 'a', id: 1 } }))
+      if (req.url === '/api/hello') return res.writeHead(500).end('{}')
+      inbox.push(JSON.parse(body))
+      res.end(JSON.stringify({ messages: [], online: 0 }))
+    })
+  })
+  await new Promise(resolve => board.listen(0, '127.0.0.1', resolve))
+  const home = mkdtempSync(join(tmpdir(), 'agb-cli-'))
+  try {
+    const child = spawn('node', [new URL('../cli/agb.mjs', import.meta.url).pathname, 'hook', '--harness', 'claude-code'], {
+      env: { ...process.env, AGB_HOME: home, AGB_URL: `http://127.0.0.1:${board.address().port}`, AGB_SECRET: 's' },
+    })
+    child.stdin.end(JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: home, prompt: 'typed', redacted: true }))
+    await new Promise(resolve => child.on('exit', resolve))
+    assert.deepEqual(inbox.map(b => b.prompt), ['typed'])
+  } finally {
+    board.close()
+    rmSync(home, { recursive: true })
+  }
 })
 
 test('normalizeRepo reads owner/name as GitHub and a URL or remote like git does', () => {
