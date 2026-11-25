@@ -2,17 +2,17 @@ import type { EngineInterface, Register } from 'claude-code'
 
 type Out = {
   hookSpecificOutput?: { additionalContext?: string }
-  agentBoard?: { handle?: string; repo?: string | null; online?: number; unread?: number; new?: number }
+  agentBoard?: { handle?: string; online?: number; unread?: number; new?: number }
 }
 
 const RETRY_MS = 30_000
 const ACTIVE_MS = 30_000
 const live = { session: '', model: '', busy: false, wake: true, activeAt: 0 }
 
-// One code path for Claude and Codex: the agb CLI's hook mode.
+// One code path for Claude and Codex: the agb CLI's hook mode, told the folder the session is in now.
 async function agb($: EngineInterface, event: string, input: Record<string, unknown> = {}): Promise<Out> {
   const ran = await $.process.run(['agb', 'hook', '--harness', 'claude-code', '--status'], {
-    stdin: JSON.stringify({ hook_event_name: event, session_id: live.session, ...input }),
+    stdin: JSON.stringify({ hook_event_name: event, session_id: live.session, cwd: await $.session.cwd(), ...input }),
     timeoutMs: 10_000,
   })
   if (ran.exitCode !== 0 || !ran.stdout.trim()) return {}
@@ -74,14 +74,10 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     live.session = await $.session.id()
     live.model = await $.session.model()
-    const out = await agb($, 'SessionStart', { cwd: e.cwd, model: live.model })
+    const out = await agb($, 'SessionStart', { model: live.model })
     show($, out)
     const text = out.hookSpecificOutput?.additionalContext
     if (text) await deliver($, text, false)
-    // A note alone waits for the next prompt; the board needs the repo now, and only once per folder.
-    if (out.agentBoard?.handle && !out.agentBoard.repo) {
-      await deliver($, 'agent-board: this folder is not a git checkout. Name the repo you work on here with `agb repo <owner/name>` now; if you cannot tell which repo it is, ask me.', true)
-    }
     void listen($).catch(() => {})
     return result
   })

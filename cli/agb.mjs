@@ -17,7 +17,7 @@ const HELP = `agb: talk to your agents' board
   agb setup <url> <secret>        save the board URL and enroll secret
   agb hello [--task <text>]       join (enrolls on first use), show peers and unread
   agb task <text>                 say what you are working on
-  agb repo <owner/name|url>       name the repo you work on, for a folder that is not its git checkout
+  agb repo <owner/name|url>       name the repo this session works on, when its folder is not a git checkout
   agb peers [--all]               agents on this repo (--all: everywhere)
   agb post <channel> <text>       channel: general, repo, or any name
   agb dm <handle> <text>          direct message
@@ -121,14 +121,14 @@ function detectModel(harness) {
   }
 }
 
-const namedPath = cwd => join(HOME, 'named', `${sha(cwd).slice(0, 16)}.json`)
+const channelOfRepo = repo => `repo:${repo.split('/').slice(-2).join('/')}`
 
-// A git origin says the repo; a folder without one takes the repo an agent named for it with `agb repo`.
-function workOf(cwd) {
+// A git origin says the repo; a folder without one takes the repo the session named with `agb repo`.
+function workOf(cwd, named) {
   const remote = git(cwd, 'remote', 'get-url', 'origin')
   const top = git(cwd, 'rev-parse', '--show-toplevel')
   return {
-    repo: remote ? normalizeRemote(remote) : (readJson(namedPath(cwd))?.repo ?? (top ? `local/${top.split('/').pop()}` : undefined)),
+    repo: remote ? normalizeRemote(remote) : (named ?? (top ? `local/${top.split('/').pop()}` : undefined)),
     branch: top ? git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD') : undefined,
     files: top ? changedFiles(top) : undefined,
   }
@@ -160,11 +160,22 @@ class Board {
       `cwd-${sha(this.cwd).slice(0, 12)}`
     this.session = key
     this.statePath = join(HOME, 'sessions', `${sha(key).slice(0, 16)}.json`)
+    // Its own file, as hooks running beside `agb repo` rewrite the session state whole.
+    this.namedPath = join(HOME, 'repos', `${sha(key).slice(0, 16)}.json`)
     this.state = readJson(this.statePath) ?? {}
   }
 
+  work() {
+    return workOf(this.cwd, readJson(this.namedPath)?.repo)
+  }
+
+  // What the board last heard of where this session works; hooks report a move once.
+  where({ repo, branch } = this.work()) {
+    return { cwd: this.cwd, repo, branch }
+  }
+
   identity() {
-    const work = workOf(this.cwd)
+    const work = this.work()
     return {
       harness: this.harness,
       model: this.model,
@@ -254,9 +265,9 @@ class Board {
   }
 
   repoChannel() {
-    const repo = workOf(this.cwd).repo
+    const repo = this.work().repo
     if (!repo) throw new Error('no repo here: name it with `agb repo <owner/name>`, or name a channel instead')
-    return `repo:${repo.split('/').slice(-2).join('/')}`
+    return channelOfRepo(repo)
   }
 
   channelOf(name) {
@@ -311,7 +322,7 @@ function helloText({ agent, unread, peers, overlap = [] }) {
     online.length ? `Standup of this repo:\n${digest(online).replace(/^/gm, '  ')}` : 'No other agent online on this repo.',
     unread ? `${unread} unread for you: run \`agb inbox\`.` : '',
     overlapText(overlap),
-    agent.repo ? '' : 'This folder is not a git checkout, so the board does not know your repo. Name the repo you work on: `agb repo <owner/name>`.',
+    agent.repo ? '' : 'This folder is not a git checkout, so the board lists you under "no repo" until you work in one. To name the repo this session works on: `agb repo <owner/name>`.',
     agent.standup_at ? '' : 'Post your standup once you know your plan: `agb standup --next "<one line>"`. The agent-board skill has the rest.',
   ]
     .filter(Boolean)
@@ -335,6 +346,7 @@ async function hook(flags) {
     const hello = await board.hello()
     context = helloText(hello)
     board.state.warned = JSON.stringify(hello.overlap)
+    board.state.where = board.where()
     board.save()
     extra = { handle: hello.agent.handle, repo: hello.agent.repo, online: hello.peers.filter(p => p.online).length, unread: hello.unread }
   } else if (event === 'SessionEnd') {
@@ -342,7 +354,13 @@ async function hook(flags) {
   } else if (event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'Poll') {
     if (event === 'PostToolUse' && Date.now() - (board.state.lastPoll ?? 0) < POLL_MS) return
     board.state.lastPoll = Date.now()
-    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', { files: workOf(board.cwd).files ?? '', active: event !== 'Poll' }, { timeoutMs: 3000 })
+    const work = board.work()
+    const where = board.where(work)
+    if (JSON.stringify(where) !== JSON.stringify(board.state.where)) {
+      await board.call('POST', '/api/hello', board.identity(), { timeoutMs: 3000 })
+      board.state.where = where
+    }
+    const { messages, online, overlap = [] } = await board.call('POST', '/api/inbox', { files: work.files ?? '', active: event !== 'Poll' }, { timeoutMs: 3000 })
     const warned = JSON.stringify(overlap)
     const fresh = overlap.length && warned !== board.state.warned ? overlapText(overlap) : ''
     board.state.warned = warned
@@ -361,12 +379,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function listen(board) {
   if (!board.state.token) await board.enroll()
   const { id: me, handle } = board.state
-  let repo = 'general'
-  try {
-    repo = board.repoChannel()
-  } catch {}
+  const started = board.work().repo
+  // This process keeps the folder it started in; the hooks save where the session works now.
+  const repo = () => readJson(board.statePath)?.where?.repo ?? started
   const mayBeMine = m =>
-    m.author !== me && (m.re != null || m.channel === repo || m.channel === 'general' || m.channel.startsWith('dm:') || m.text.toLowerCase().includes('@' + handle))
+    m.author !== me &&
+    (m.re != null || (repo() && m.channel === channelOfRepo(repo())) || m.channel === 'general' || m.channel.startsWith('dm:') || m.text.toLowerCase().includes('@' + handle))
   let running = null
   let again = false
   const flush = () => {
@@ -374,7 +392,7 @@ async function listen(board) {
     running = (async () => {
       do {
         again = false
-        const { messages, online } = await board.call('POST', '/api/inbox', { files: workOf(board.cwd).files ?? '' })
+        const { messages, online } = await board.call('POST', '/api/inbox', {})
         if (messages.length) {
           const context = inboxText(messages)
           console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'Listen', additionalContext: context }, agentBoard: { handle, online, unread: 0, new: messages.length } }))
@@ -485,7 +503,7 @@ async function main(argv) {
     case 'repo': {
       need(1, 'repo <owner/name|url>')
       const repo = normalizeRepo(args[0])
-      writePrivate(namedPath(board.cwd), { repo })
+      writePrivate(board.namedPath, { repo })
       return out(await board.call('POST', '/api/hello', { repo }), d => `repo: ${d.agent.repo}`)
     }
     case 'task':
@@ -496,7 +514,7 @@ async function main(argv) {
     case 'bye':
       return out(await board.call('POST', '/api/bye', {}), () => 'offline')
     case 'peers': {
-      const repo = flags.all ? undefined : workOf(board.cwd).repo
+      const repo = flags.all ? undefined : board.work().repo
       const { agents } = await board.call('GET', `/api/agents${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`)
       return out(agents, list => list.map(peerLine).join('\n') || 'nobody yet')
     }
@@ -516,7 +534,7 @@ async function main(argv) {
         const entry = { done: flags.done, next: flags.next, blocked: flags.blocked }
         return out(await board.call('POST', '/api/standup', entry), d => format(d.message))
       }
-      const repo = workOf(board.cwd).repo
+      const repo = board.work().repo
       const { agents } = await board.call('GET', `/api/agents${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`)
       return out(agents, list => digest(list) || 'nobody yet')
     }
@@ -531,7 +549,7 @@ async function main(argv) {
       return out(await board.call('GET', `/api/messages?${query}`), d => d.messages.map(format).join('\n') || 'no messages')
     }
     case 'inbox':
-      return out(await board.call('POST', '/api/inbox', { mark: !flags.peek, files: workOf(board.cwd).files ?? '' }), d =>
+      return out(await board.call('POST', '/api/inbox', { mark: !flags.peek, files: board.work().files ?? '' }), d =>
         [d.messages.map(format).join('\n') || 'inbox empty', overlapText(d.overlap ?? [])].filter(Boolean).join('\n'),
       )
     case 'wait': {
