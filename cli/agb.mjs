@@ -399,9 +399,9 @@ async function hook(flags) {
     const name = board.title()
     const where = board.where(work)
     if (JSON.stringify(where) !== JSON.stringify(board.state.where)) {
-      // A failed hello is retried by the next hook; the prompt or answer still goes out below.
+      // Codex gives a hook 5 s for this and the inbox call; a failed hello is retried by the next hook.
       try {
-        await board.call('POST', '/api/hello', board.identity(work, name), { timeoutMs: 3000 })
+        await board.call('POST', '/api/hello', board.identity(work, name), { timeoutMs: 1500 })
         board.state.where = where
         board.save()
       } catch (error) {

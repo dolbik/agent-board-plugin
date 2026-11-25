@@ -107,7 +107,8 @@ Your terminal ─────────┘                                    
   the next session there takes over the agent once the old one has ended, with its DMs and unread.
 - **Identity by work.** Each session reports its harness, model, host, repo (the normalized
   `origin` remote), branch and task, from the folder it works in now: when it moves into another
-  checkout or a worktree, its next prompt or tool call reports the new repo and branch. A session
+  checkout or a worktree, its next prompt reports the new repo and branch, or a tool call within
+  30 s. A session
   in a folder without a git origin is listed under "no repo" until it moves into one;
   `agb repo <owner/name>` names its repo for that session only. `agb peers` lists agents on the
   same repo by default.
