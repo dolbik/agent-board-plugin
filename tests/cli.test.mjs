@@ -47,31 +47,31 @@ test('sessionTitle takes the name the user gave the session, else the generated 
   assert.equal(sessionTitle(''), undefined)
 })
 
-// A board that answers /api/hello as `hello` says, then runs one prompt hook in a new folder and returns the inbox bodies.
+// A board that answers /api/hello as `hello` says, then runs one prompt hook in a new folder.
 async function promptAfterMove(hello) {
-  const inbox = []
+  const seen = { prompts: [], helloDropped: false }
   const board = createServer((req, res) => {
     let body = ''
     req.on('data', chunk => (body += chunk))
     req.on('end', () => {
       if (req.url === '/api/enroll') return res.end(JSON.stringify({ token: 't', agent: { handle: 'a', id: 1 } }))
-      if (req.url === '/api/hello') return hello(res)
-      setTimeout(() => {
-        inbox.push(JSON.parse(body))
-        res.end(JSON.stringify({ messages: [], online: 0 }))
-      }, 2500)
+      if (req.url === '/api/hello') {
+        res.on('close', () => (seen.helloDropped ||= !res.writableEnded))
+        return hello(res)
+      }
+      seen.prompts.push(JSON.parse(body).prompt)
+      res.end(JSON.stringify({ messages: [], online: 0 }))
     })
   })
   await new Promise(resolve => board.listen(0, '127.0.0.1', resolve))
   const home = mkdtempSync(join(tmpdir(), 'agb-cli-'))
   try {
-    const started = Date.now()
     const child = spawn('node', [new URL('../cli/agb.mjs', import.meta.url).pathname, 'hook', '--harness', 'codex'], {
       env: { ...process.env, AGB_HOME: home, AGB_URL: `http://127.0.0.1:${board.address().port}`, AGB_SECRET: 's' },
     })
     child.stdin.end(JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: home, prompt: 'typed', redacted: true }))
     await new Promise(resolve => child.on('exit', resolve))
-    return { prompts: inbox.map(b => b.prompt), ms: Date.now() - started }
+    return seen
   } finally {
     board.closeAllConnections()
     board.close()
@@ -83,10 +83,9 @@ test('a hook still reports the prompt when telling the board about a new folder 
   assert.deepEqual((await promptAfterMove(res => res.writeHead(500).end('{}'))).prompts, ['typed'])
 })
 
-test('a hook that reports a new folder to a slow board ends within the 5 s Codex gives it', async () => {
-  const { prompts, ms } = await promptAfterMove(res => setTimeout(() => res.end('{}'), 2500))
-  assert.deepEqual(prompts, ['typed'])
-  assert.ok(ms < 5000, `took ${ms} ms`)
+test('a hook gives up on a slow hello, so with the inbox call it fits the 5 s Codex gives it', async () => {
+  const seen = await promptAfterMove(res => setTimeout(() => res.destroyed || res.end('{}'), 2500))
+  assert.deepEqual(seen, { prompts: ['typed'], helloDropped: true })
 })
 
 test('normalizeRepo reads owner/name as GitHub and a URL or remote like git does', () => {
