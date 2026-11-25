@@ -11,10 +11,17 @@ const TEXT_MAX = 2_000
 const TYPED = new Set(['composer', 'bridge', 'sdk'])
 const live = { session: '', transcript: '', model: '', busy: false, wake: true, activeAt: 0 }
 
-// One code path for Claude and Codex: the agb CLI's hook mode, told the folder the session is in now.
+// One code path for Claude and Codex: the agb CLI's hook mode, told the folder and model the session has now.
 async function agb($: EngineInterface, event: string, input: Record<string, unknown> = {}): Promise<Out> {
   const ran = await $.process.run(['agb', 'hook', '--harness', 'claude-code', '--status'], {
-    stdin: JSON.stringify({ hook_event_name: event, session_id: live.session, cwd: await $.session.cwd(), transcript_path: live.transcript, ...input }),
+    stdin: JSON.stringify({
+      hook_event_name: event,
+      session_id: live.session,
+      cwd: await $.session.cwd(),
+      model: live.model,
+      transcript_path: live.transcript,
+      ...input,
+    }),
     timeoutMs: 10_000,
   })
   if (ran.exitCode !== 0 || !ran.stdout.trim()) return {}
@@ -91,7 +98,7 @@ export const register: Register = (on, options) => {
     live.session = await $.session.id()
     live.transcript = (await $.session.info()).transcriptPath
     live.model = await $.session.model()
-    const out = await agb($, 'SessionStart', { model: live.model })
+    const out = await agb($, 'SessionStart')
     show($, out)
     const text = out.hookSpecificOutput?.additionalContext
     if (text) await deliver($, text, false)
@@ -110,14 +117,13 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     live.busy = true
-    active($)
     const model = await $.session.model()
-    if (live.session && model !== live.model) {
+    // A new model goes out at once with the next report, which tells the board as it does a new folder.
+    if (model !== live.model) {
       live.model = model
-      await $.process.run(['agb', 'hello', '--session', live.session, '--harness', 'claude-code', '--model', model, '--json'], {
-        timeoutMs: 10_000,
-      })
+      live.activeAt = 0
     }
+    active($)
     return next(e)
   })
 
@@ -137,7 +143,11 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (live.session) await agb($, 'SessionEnd')
+    if (live.session) {
+      // A report still in flight would mark the session online again after its goodbye.
+      await reports
+      await agb($, 'SessionEnd')
+    }
     return next(e)
   })
 }

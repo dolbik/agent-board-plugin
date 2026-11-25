@@ -181,7 +181,6 @@ class Board {
     this.url = (process.env.AGB_URL ?? config.url)?.replace(/\/+$/, '')
     this.secret = process.env.AGB_SECRET ?? config.secret
     this.harness = flags.harness ?? detectHarness()
-    this.model = flags.model ?? hookInput.model ?? detectModel(this.harness)
     const key =
       flags.session ??
       hookInput.session_id ??
@@ -195,6 +194,8 @@ class Board {
     // Its own file, as hooks running beside `agb repo` rewrite the session state whole.
     this.namedPath = join(HOME, 'repos', `${sha(key).slice(0, 16)}.json`)
     this.state = readJson(this.statePath) ?? {}
+    // The settings name a default model, not the one a running session uses, so they come last.
+    this.model = flags.model ?? hookInput.model ?? this.state.where?.model ?? detectModel(this.harness)
     this.transcript = hookInput.transcript_path
   }
 
@@ -206,9 +207,9 @@ class Board {
     return workOf(this.cwd, readJson(this.namedPath)?.repo)
   }
 
-  // What the board last heard of where this session works; hooks report a move once.
+  // What the board last heard of where and with which model this session works; hooks report a change once.
   where({ repo, branch } = this.work()) {
-    return { cwd: this.cwd, repo, branch }
+    return { cwd: this.cwd, repo, branch, model: this.model }
   }
 
   // An empty repo and branch tell the board the session now works outside a checkout.
@@ -400,6 +401,7 @@ async function hook(flags) {
     if (JSON.stringify(where) !== JSON.stringify(board.state.where)) {
       await board.call('POST', '/api/hello', board.identity(work, name), { timeoutMs: 3000 })
       board.state.where = where
+      board.save()
     }
     const body = {
       files: work.files ?? '',
